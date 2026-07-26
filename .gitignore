@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+*.swp
+*.swo
+*~
+.DS_Store
+# User config (contains API keys)
+config.json
