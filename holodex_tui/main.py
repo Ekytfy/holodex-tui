@@ -44,7 +44,7 @@ console = Console()
 API_URL = "https://holodex.net/api/v2/live"
 CHANNELS_URL = "https://holodex.net/api/v2/channels"
 REFRESH_INTERVAL = 60
-MAX_CHANNELS = 3000
+MAX_CHANNELS = 10000
 PAGE_SIZE = 20
 
 FALLBACK_ORGS = [
