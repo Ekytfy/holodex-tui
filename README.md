@@ -16,7 +16,7 @@ A minimal terminal UI for browsing live and upcoming VTuber streams via [Holodex
 
 - Python 3.10+
 - [mpv](https://mpv.io) (with [yt-dlp](https://github.com/yt-dlp/yt-dlp) installed)
-- A free [Holodex](https://holodex.net) account
+- A [Holodex](https://holodex.net) account (For API)
 
 ## Installation
 
