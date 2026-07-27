@@ -61,7 +61,7 @@ API Key: ████████████████████
 ✓ Key saved!
 ```
 
-Your key is saved to `~/.config/holodex-tui/config.json` with `600` permissions (owner-only read/write).
+Your key is saved to `~/.config/holodex-tui/config.json`.
 
 You can also set it via environment variable:
 
