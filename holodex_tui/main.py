@@ -18,6 +18,7 @@ Keys (org picker):
   f              Toggle favorite
   R              Refresh org list
   Esc            Clear search / cancel
+  g/G              Jump to top/bottom
   q              Cancel
 """
 
@@ -140,6 +141,7 @@ class HolodexTUI:
         self.upcoming_hours = upcoming_hours
         self.streams = []
         self.selected = 0
+        self.scroll_top = 0
         self.last_fetch = 0
         self.needs_redraw = True
         self.show_help = False
@@ -331,7 +333,7 @@ class HolodexTUI:
         search_info = f" | filter: '{self.search_query}'" if self.search_query else ""
         page_info = f" | {self.org_selected + 1}/{total_items} matched"
         console.print(Align.center(Panel(
-            f"[bold]Select Organization[/bold] {status}{page_info}{search_info} | / search | f fav | R refresh | q cancel",
+            f"[bold]Select Organization[/bold] {status}{page_info}{search_info} | / search | f fav | R refresh | g/G jump | q cancel",
             border_style="yellow",
         )))
         console.print()
@@ -425,6 +427,16 @@ class HolodexTUI:
         elif not self.streams:
             console.print("[yellow]No streams found.[/yellow]")
         else:
+            # Calculate viewport boundaries
+            visible_start = self.scroll_top
+            visible_end = min(self.scroll_top + PAGE_SIZE, len(self.streams))
+
+            # Show scroll hints
+            if self.scroll_top > 0:
+                console.print("[dim]▲ more above[/dim]")
+            if visible_end < len(self.streams):
+                console.print("[dim]▼ more below[/dim]")
+
             table = Table(
                 show_header=True, header_style="bold magenta",
                 box=box.ROUNDED, expand=True, row_styles=["", "dim"], pad_edge=False,
@@ -436,7 +448,7 @@ class HolodexTUI:
             table.add_column("Topic", style="yellow", width=12, no_wrap=True)
             table.add_column("Info", style="bright_cyan", width=18, justify="right")
 
-            for i, s in enumerate(self.streams):
+            for i, s in enumerate(self.streams[visible_start:visible_end]):
                 ch = s.get("channel", {})
                 name = ch.get("english_name") or ch.get("name") or "Unknown"
                 title = s.get("title", "Untitled")[:52]
@@ -445,9 +457,10 @@ class HolodexTUI:
                 indicator = "[red]●[/]" if is_live else "[dim]○[/]"
                 info = self._fmt_viewers(s.get("live_viewers")) if is_live else self._fmt_time(s.get("start_scheduled"))
 
-                if i == self.selected:
+                actual_index = visible_start + i
+                if actual_index == self.selected:
                     table.add_row(
-                        f"> {i + 1}",
+                        f"> {actual_index + 1}",
                         f"[bold reverse]{indicator}[/]",
                         f"[bold reverse]{name}[/]",
                         f"[bold reverse]{title}[/]",
@@ -455,14 +468,14 @@ class HolodexTUI:
                         f"[bold reverse]{info}[/]",
                     )
                 else:
-                    table.add_row(str(i + 1), indicator, name, title, topic, info)
+                    table.add_row(str(actual_index + 1), indicator, name, title, topic, info)
 
             console.print(table)
 
         if self.show_help:
             console.print()
             console.print(Align.center(Panel(
-                "[dim]↑/↓ j/k navigate | Enter open | o change org | r refresh | q quit[/dim]",
+                "[dim]↑/↓ j/k navigate | g/G top/bottom | Enter open | o change org | r refresh | q quit[/dim]",
                 border_style="dim",
             )))
 
@@ -655,10 +668,10 @@ class HolodexTUI:
                     total_items = len(filtered) + 1
 
                     if key in ("\x1b[A", "k"):
-                        self.org_selected = (self.org_selected - 1) % max(1, total_items)
+                        self.org_selected = max(0, min(self.org_selected - 1, total_items - 1))
                         self.needs_redraw = True
                     elif key in ("\x1b[B", "j"):
-                        self.org_selected = (self.org_selected + 1) % max(1, total_items)
+                        self.org_selected = max(0, min(self.org_selected + 1, total_items - 1))
                         self.needs_redraw = True
                     elif key in ("\r", "\n"):
                         if total_items > 0:
@@ -687,14 +700,30 @@ class HolodexTUI:
                         else:
                             self.mode = "main"
                             self.needs_redraw = True
+                    elif key == "g":
+                        self.org_selected = 0
+                        self.org_scroll_top = 0
+                        self.needs_redraw = True
+                    elif key == "G":
+                        filtered = self._filtered_orgs()
+                        if filtered:
+                            self.org_selected = len(filtered) - 1
+                            self.org_scroll_top = max(0, len(filtered) - PAGE_SIZE)
+                            self.needs_redraw = True
                     continue
 
                 # ── Main Mode ──
                 if key in ("\x1b[A", "k"):
-                    self.selected = (self.selected - 1) % max(1, len(self.streams))
+                    self.selected = max(0, self.selected - 1)
+                    # Auto-scroll to keep selected item visible
+                    if self.selected < self.scroll_top:
+                        self.scroll_top = self.selected
                     self.needs_redraw = True
                 elif key in ("\x1b[B", "j"):
-                    self.selected = (self.selected + 1) % max(1, len(self.streams))
+                    self.selected = min(len(self.streams) - 1, self.selected + 1)
+                    # Auto-scroll to keep selected item visible
+                    if self.selected >= self.scroll_top + PAGE_SIZE:
+                        self.scroll_top = self.selected - PAGE_SIZE + 1
                     self.needs_redraw = True
                 elif key in ("\r", "\n"):
                     self._open()
@@ -717,6 +746,14 @@ class HolodexTUI:
                     next_refresh = time.time() + REFRESH_INTERVAL
                 elif key == "?":
                     self.show_help = not self.show_help
+                    self.needs_redraw = True
+                elif key == "g":
+                    self.selected = 0
+                    self.scroll_top = 0
+                    self.needs_redraw = True
+                elif key == "G":
+                    self.selected = len(self.streams) - 1
+                    self.scroll_top = max(0, len(self.streams) - PAGE_SIZE)
                     self.needs_redraw = True
                 elif key == "q":
                     break
