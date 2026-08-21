@@ -502,18 +502,6 @@ class HolodexTUI:
 
         cmd = [
             "mpv",
-            # CRITICAL: Prefer combined video+audio formats.
-            # YouTube live DASH splits audio/video into separate streams,
-            # which causes desync and buffer bloat. Combined formats are
-            # one single stream — far more stable for live viewing.
-            "--ytdl-format=best[height<=720][vcodec!=none][acodec!=none]/best[height<=720]",
-            # Generous cache to absorb network jitter
-            "--cache=yes",
-            "--cache-secs=60",
-            "--demuxer-max-bytes=100M",
-            "--demuxer-max-back-bytes=50M",
-            "--demuxer-readahead-secs=60",
-            # Live streams are not seekable; tell mpv not to try
             "--force-seekable=no",
             url,
         ]
