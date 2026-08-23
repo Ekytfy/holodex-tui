@@ -11,6 +11,7 @@ A minimal terminal UI for browsing live and upcoming VTuber streams via [Holodex
 - **Navigate** with arrow keys or vim bindings (`j`/`k`)
 - **Open** any stream in mpv with `Enter`
 - **Filter** by any organization Holodex tracks
+- **Music Mode** listen to karaoke/cover/original song 
 
 ## Requirements
 
@@ -110,6 +111,27 @@ holodex-tui --hours 48
 | `Esc` | Clear search / cancel |
 | `q` | Cancel |
 
-## License
+### Keys (music channel picker)
 
-MIT
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` or `j`/`k` | Navigate streamers |
+| `Enter` | Pick streamer → video list |
+| `/` | Search/filter streamers |
+| `r` | Refresh channel list |
+| `Esc` | Clear search / cancel |
+| `m` or `q` | Back to livestreams |
+
+### Keys (music video list)
+
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` or `j`/`k` | Navigate videos |
+| `Enter` | Open in mpv |
+| `1` | All tab |
+| `2` | Karaoke tab |
+| `3` | Cover tab |
+| `4` | Original tab |
+| `r` | Refresh videos |
+| `Esc` | Back to channel picker |
+| `m` or `q` | Back to livestreams |
