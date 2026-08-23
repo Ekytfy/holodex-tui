@@ -147,14 +147,30 @@ class HolodexTUI:
         self.show_help = False
         self.error_msg = None
         self.mpv_ok = subprocess.run(["which", "mpv"], capture_output=True).returncode == 0
+        
 
         self.mode = "main"
+        self.prev_mode = "main"
         self.org_selected = 0
         self.org_scroll_top = 0
         self.orgs = []
         self.org_error = None
         self.custom_buf = ""
         self.fetching_orgs = False
+
+        # Music mode state
+        self.music_submode = "channels"  # "channels" | "videos"
+        self.music_channels = []
+        self.music_channel_selected = 0
+        self.music_channel_scroll_top = 0
+        self.music_channel_search = ""
+        self.music_channel_search_mode = False
+        self.music_current_channel = None
+        self.music_video_filter = "all"  # "all" | "karaoke" | "cover"
+        self.music_videos = []
+        self.music_video_selected = 0
+        self.music_video_scroll_top = 0
+        self.music_last_fetch = 0
 
         # Search state
         self.search_query = ""
@@ -170,6 +186,34 @@ class HolodexTUI:
             "Accept": "application/json",
             "X-APIKEY": api_key,
         }
+    def _handle_music_search_key(self, key):
+        if key == "\x7f" or key == "\x08":
+            self.music_channel_search = self.music_channel_search[:-1]
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            self.needs_redraw = True
+            return True
+        elif key in ("\r", "\n"):
+            self.music_channel_search_mode = False
+            self.needs_redraw = True
+            return True
+        elif key == "\x1b":
+            self.music_channel_search = ""
+            self.music_channel_search_mode = False
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            self.needs_redraw = True
+            return True
+        elif key in ("\x1b[A", "\x1b[B"):
+            self.music_channel_search_mode = False
+            return False
+        elif len(key) == 1 and 32 <= ord(key) <= 126:
+            self.music_channel_search += key
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            self.needs_redraw = True
+            return True
+        return False
 
     def _load_cached_orgs(self):
         config = load_config()
@@ -248,6 +292,136 @@ class HolodexTUI:
         finally:
             self.fetching_orgs = False
             flush_input()
+    
+    def fetch_music_channels(self):
+        # ── Check cache ──
+        config = load_config()
+        cache_key = f"music_channels_{self.org}"
+        cached = config.get(cache_key)
+        if cached and time.time() - cached.get("ts", 0) < 3600:
+            self.music_channels = cached["data"]
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            self.music_last_fetch = time.time()
+            self.error_msg = None
+            return
+
+        # ── Fetch from API ──
+        try:
+            all_channels = []
+            seen = set()
+            offset = 0
+            limit = 100
+
+            while offset < 10000:
+                params = {
+                    "org": self.org,
+                    "type": "vtuber",
+                    "limit": limit,
+                    "offset": offset,
+                }
+                resp = requests.get(
+                    "https://holodex.net/api/v2/channels",
+                    headers=self.headers, params=params, timeout=15,
+                )
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                if not data:
+                    break
+                for ch in data:
+                    ch_id = ch.get("id")
+                    if ch_id and ch_id not in seen:
+                        seen.add(ch_id)
+                        all_channels.append({
+                            "id": ch_id,
+                            "name": ch.get("english_name") or ch.get("name", "Unknown"),
+                        })
+                if len(data) < limit:
+                    break
+                offset += limit
+
+            self.music_channels = all_channels
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            self.music_last_fetch = time.time()
+            self.error_msg = None
+
+            # ── Save to cache ──
+            config[cache_key] = {"data": all_channels, "ts": time.time()}
+            save_config(config)
+
+        except requests.RequestException as e:
+            self.error_msg = str(e)
+            self.music_channels = []
+
+    def fetch_music_videos(self, channel_id, filter_type="all"):
+        try:
+            all_vids = []
+            seen = set()
+
+            def fetch_topic(topic, category):
+                offset = 0
+                limit = 50
+                while offset < 500:
+                    params = {
+                        "channel_id": channel_id,
+                        "topic": topic,
+                        "sort": "available_at",
+                        "order": "desc",
+                        "limit": limit,
+                        "offset": offset,
+                    }
+                    resp = requests.get(
+                        "https://holodex.net/api/v2/videos",
+                        headers=self.headers, params=params, timeout=10,
+                    )
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    if not data:
+                        break
+                    for v in data:
+                        vid = v.get("id")
+                        if vid and vid not in seen:
+                            seen.add(vid)
+                            v["_category"] = category
+                            all_vids.append(v)
+                    if len(data) < limit:
+                        break
+                    offset += limit
+
+            # Only fetch by topic — no fallback broad search
+            if filter_type in ("all", "karaoke"):
+                fetch_topic("singing", "karaoke")
+            if filter_type in ("all", "cover"):
+                fetch_topic("Music_Cover", "cover")
+            if filter_type in ("all", "original"):
+                fetch_topic("Original_Song", "original")
+
+            # Sort by date
+            all_vids.sort(
+                key=lambda v: v.get("available_at") or "",
+                reverse=True
+            )
+
+            # Filter
+            if filter_type == "karaoke":
+                result = [v for v in all_vids if v["_category"] == "karaoke"]
+            elif filter_type == "cover":
+                result = [v for v in all_vids if v["_category"] == "cover"]
+            elif filter_type == "original":
+                result = [v for v in all_vids if v["_category"] == "original"]
+            else:  # all
+                result = [v for v in all_vids if v["_category"] in ("karaoke", "cover", "original")]
+
+            self.music_videos = result
+            self.music_video_selected = 0
+            self.music_video_scroll_top = 0
+            self.music_video_filter = filter_type
+            self.error_msg = None
+        except requests.RequestException as e:
+            self.error_msg = str(e)
 
     def fetch(self):
         try:
@@ -270,6 +444,63 @@ class HolodexTUI:
             self.selected = 0
         except requests.RequestException as e:
             self.error_msg = str(e)
+
+    def fetch_music(self, sub_mode="archives"):
+        """Fetch music-related videos from Holodex."""
+        try:
+            if sub_mode == "upcoming":
+                params = {
+                    "org": self.org,
+                    "status": "upcoming",
+                    "topic": "singing",
+                    "type": "stream",
+                    "max_upcoming_hours": self.upcoming_hours,
+                }
+                resp = requests.get(
+                    "https://holodex.net/api/v2/live",
+                    headers=self.headers, params=params, timeout=10
+                )
+            else:
+                # archives and covers both use /videos
+                params = {
+                    "org": self.org,
+                    "status": "past",
+                    "topic": "singing",
+                    "type": "stream",
+                    "sort": "available_at",
+                    "order": "desc",
+                    "limit": 25,
+                }
+                resp = requests.get(
+                    "https://holodex.net/api/v2/videos",
+                    headers=self.headers, params=params, timeout=10
+                )
+            
+            resp.raise_for_status()
+            self.music_streams = resp.json()
+            self.music_last_fetch = time.time()
+            self.music_selected = 0
+            self.music_scroll_top = 0
+        except requests.RequestException as e:
+            self.error_msg = str(e)
+
+
+    def get_music_archives(self, org="Hololive", limit=25):
+        return self._get("/videos", params={
+            "topic": "singing",
+            "type": "stream",
+            "status": "past",
+            "org": org,
+            "sort": "available_at",
+            "order": "desc",
+            "limit": limit,
+        })
+
+    def get_video_songs(self, video_id):
+        return self._get(f"/videos/{video_id}", params={
+            "include": "songs"
+        })
+
 
     def _fmt_viewers(self, n):
         if n is None:
@@ -296,6 +527,160 @@ class HolodexTUI:
         except Exception:
             return iso_str[11:16]
 
+    def _draw_music(self):
+        if self.music_submode == "channels":
+            self._draw_music_channels()
+        else:
+            self._draw_music_videos()
+
+    def _filtered_music_channels(self):
+        if not self.music_channel_search:
+            return self.music_channels
+        q = self.music_channel_search.lower()
+        return [c for c in self.music_channels if q in c.get("name", "").lower()]
+
+    def _draw_music_channels(self):
+        console.clear()
+        total = len(self.music_channels)
+        search_info = f" | filter: '{self.music_channel_search}'" if self.music_channel_search else ""
+        page_info = f" | {self.music_channel_selected + 1}/{max(1,total)}"
+
+        header = (
+            f"[bold]Music - Pick a Streamer[/] | [cyan]{self.org}[/]{page_info}{search_info} | "
+            f"/ search | Enter pick | m back | q quit"
+        )
+        console.print(Align.center(Panel(header, border_style="magenta")))
+        console.print()
+
+        if self.error_msg:
+            console.print(f"[red]Error: {self.error_msg}[/red]")
+            console.print("[dim]Press r to retry[/dim]")
+            return
+
+        if not self.music_channels:
+            console.print("[yellow]No streamers with music found.[/yellow]")
+            return
+
+        filtered = self._filtered_music_channels()
+        total_items = len(filtered)
+
+        if not filtered and self.music_channel_search:
+            console.print(f"[yellow]No streamers match '{self.music_channel_search}'.[/yellow]")
+            console.print("[dim]Press Esc to clear filter[/dim]")
+            return
+
+        if self.music_channel_selected < self.music_channel_scroll_top:
+            self.music_channel_scroll_top = self.music_channel_selected
+        elif self.music_channel_selected >= self.music_channel_scroll_top + PAGE_SIZE:
+            self.music_channel_scroll_top = self.music_channel_selected - PAGE_SIZE + 1
+
+        visible_start = self.music_channel_scroll_top
+        visible_end = min(visible_start + PAGE_SIZE, total_items)
+
+        table = Table(
+            show_header=True, header_style="bold magenta",
+            box=box.ROUNDED, expand=True, row_styles=["", "dim"], pad_edge=False,
+        )
+        table.add_column("#", style="cyan", width=3, justify="right")
+        table.add_column("Streamer", style="green")
+
+        for i in range(visible_start, visible_end):
+            ch = filtered[i]
+            name = ch.get("name", "Unknown")
+            if i == self.music_channel_selected:
+                table.add_row(f"> {i + 1}", f"[bold reverse]  {name}[/]")
+            else:
+                table.add_row(str(i + 1), f"  {name}")
+
+        console.print(table)
+
+        if visible_start > 0:
+            console.print("[dim]  ▲ more above[/dim]")
+        if visible_end < total_items:
+            console.print("[dim]  ▼ more below[/dim]")
+
+        if self.music_channel_search_mode:
+            cursor = "█" if int(time.time() * 2) % 2 == 0 else " "
+            console.print(f"\n[dim]Search: {self.music_channel_search}{cursor}[/dim]")
+
+    def _draw_music_videos(self):
+        console.clear()
+        total = len(self.music_videos)
+        ch_name = self.music_current_channel.get("name", "?") if self.music_current_channel else "?"
+
+        tabs = (
+            f"[{'bold' if self.music_video_filter == 'all' else 'dim'}]1 All[/]  "
+            f"[{'bold' if self.music_video_filter == 'karaoke' else 'dim'}]2 Karaoke[/]  "
+            f"[{'bold' if self.music_video_filter == 'cover' else 'dim'}]3 Cover[/]  "
+            f"[{'bold' if self.music_video_filter == 'original' else 'dim'}]4 Original[/]"
+        )
+
+        header = (
+            f"[bold]Music - {ch_name}[/] | {tabs} | "
+            f"{total} videos | Enter play | Esc back | m main | q quit"
+        )
+        console.print(Align.center(Panel(header, border_style="magenta")))
+        console.print()
+
+        if self.error_msg:
+            console.print(f"[red]Error: {self.error_msg}[/red]")
+            return
+
+        if not self.music_videos:
+            console.print("[yellow]No videos found for this filter.[/yellow]")
+            console.print("[dim]Press 1/2/3 to change filter[/dim]")
+            return
+
+        visible_start = self.music_video_scroll_top
+        visible_end = min(self.music_video_scroll_top + PAGE_SIZE, len(self.music_videos))
+
+        if self.music_video_scroll_top > 0:
+            console.print("[dim]▲ more above[/dim]")
+
+        table = Table(
+            show_header=True, header_style="bold magenta",
+            box=box.ROUNDED, expand=True, row_styles=["", "dim"], pad_edge=False,
+        )
+        table.add_column("#", style="cyan", width=3, justify="right")
+        table.add_column("Title", style="white", ratio=2, no_wrap=True)
+        table.add_column("Topic", style="yellow", width=12, no_wrap=True)
+        table.add_column("Date", style="bright_cyan", width=12, justify="right")
+
+        for i, s in enumerate(self.music_videos[visible_start:visible_end]):
+            title = s.get("title", "Untitled")[:60]
+            topic = s.get("topic_id", "-")
+            date = s.get("available_at", "?")[:10]
+
+            actual_index = visible_start + i
+            if actual_index == self.music_video_selected:
+                table.add_row(
+                    f"> {actual_index + 1}",
+                    f"[bold reverse]{title}[/]",
+                    f"[bold reverse]{topic}[/]",
+                    f"[bold reverse]{date}[/]",
+                )
+            else:
+                table.add_row(str(actual_index + 1), title, topic, date)
+
+        console.print(table)
+
+        if visible_end < len(self.music_videos):
+            console.print("[dim]▼ more below[/dim]")
+
+
+    def _open_music_video(self):
+        if not self.music_videos:
+            return
+        vid = self.music_videos[self.music_video_selected]["id"]
+        url = f"https://www.youtube.com/watch?v={vid}"
+        console.print(f"\n[green]▶ mpv {url}[/green]")
+        if not self.mpv_ok:
+            return
+        subprocess.Popen(
+            ["mpv", "--force-seekable=no", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    
     def _draw_custom_org(self):
         console.clear()
         cursor = "█" if int(time.time() * 2) % 2 == 0 else " "
@@ -416,7 +801,7 @@ class HolodexTUI:
         header = (
             f"[bold]Holodex TUI[/] | [cyan]{self.org}[/] | "
             f"[green]{live} live[/] [dim]{total - live} up[/] | "
-            f"updated {age_str} | o org | ? help | q quit"
+            f"updated {age_str} | o org | [magenta]m music[/] | ? help | q quit"
         )
         console.print(Align.center(Panel(header, border_style="blue")))
         console.print()
@@ -475,7 +860,7 @@ class HolodexTUI:
         if self.show_help:
             console.print()
             console.print(Align.center(Panel(
-                "[dim]↑/↓ j/k navigate | g/G top/bottom | Enter open | o change org | r refresh | q quit[/dim]",
+                "[dim]↑/↓ j/k navigate | g/G top/bottom | Enter open | o change org | m music | r refresh | q quit[/dim]",
                 border_style="dim",
             )))
 
@@ -487,6 +872,8 @@ class HolodexTUI:
             self._draw_org_picker()
         elif self.mode == "custom_org":
             self._draw_custom_org()
+        elif self.mode == "music":
+            self._draw_music()
         else:
             self._draw_main()
 
@@ -507,12 +894,29 @@ class HolodexTUI:
         ]
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def _open_music(self):
+        if not self.music_streams:
+            return
+        vid = self.music_streams[self.music_selected]["id"]
+        url = f"https://www.youtube.com/watch?v={vid}"
+        console.print(f"\n[green]▶ mpv {url}[/green]")
+        if not self.mpv_ok:
+            return
+        subprocess.Popen(
+            ["mpv", "--force-seekable=no", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
     def _pick_org(self, idx):
         filtered = self._filtered_orgs()
         if idx < len(filtered):
             self.org = filtered[idx]
             self.fetch()
-            self.mode = "main"
+            self.mode = self.prev_mode
+            if self.prev_mode == "music":
+                self.fetch_music_channels()
+            else:
+                self.fetch()
             self.search_query = ""
             self.search_mode = False
         else:
@@ -608,8 +1012,12 @@ class HolodexTUI:
                     return None
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                seq = sys.stdin.read(2)
-                ch += seq
+                # Check if more bytes are available (arrow keys) without blocking
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if ready:
+                    seq = sys.stdin.read(2)
+                    ch += seq
+                # else: bare Esc, keep ch as "\x1b"
             return ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -686,7 +1094,7 @@ class HolodexTUI:
                             self.org_scroll_top = 0
                             self.needs_redraw = True
                         else:
-                            self.mode = "main"
+                            self.mode = self.prev_mode
                             self.needs_redraw = True
                     elif key == "g":
                         self.org_selected = 0
@@ -698,7 +1106,135 @@ class HolodexTUI:
                             self.org_selected = len(filtered) - 1
                             self.org_scroll_top = max(0, len(filtered) - PAGE_SIZE)
                             self.needs_redraw = True
+                    elif key == "m":
+                        self.fetch_music()
+                        self.mode = "music"
+                        self.needs_redraw = True
                     continue
+
+                # ── Music Mode ──
+                if self.mode == "music":
+                    if self.music_submode == "channels":
+                        if self.music_channel_search_mode:
+                            handled = self._handle_music_search_key(key)
+                            if handled:
+                                continue
+
+                        filtered = self._filtered_music_channels()
+                        total_items = len(filtered)
+
+                        if key in ("\x1b[A", "k"):
+                            self.music_channel_selected = max(0, min(self.music_channel_selected - 1, total_items - 1))
+                            self.needs_redraw = True
+                        elif key in ("\x1b[B", "j"):
+                            self.music_channel_selected = max(0, min(self.music_channel_selected + 1, total_items - 1))
+                            self.needs_redraw = True
+                        elif key in ("\r", "\n"):
+                            if total_items > 0 and self.music_channel_selected < len(filtered):
+                                self.music_current_channel = filtered[self.music_channel_selected]
+                                self.fetch_music_videos(self.music_current_channel["id"], "all")
+                                self.music_submode = "videos"
+                                self.needs_redraw = True
+                        elif key == "/":
+                            self.music_channel_search_mode = True
+                            self.needs_redraw = True
+                        elif key == "r":
+                            self.fetch_music_channels()
+                            self.needs_redraw = True
+                        elif key == "o":
+                            self.prev_mode = "music"
+                            self.fetch_orgs()
+                            self.mode = "org_picker"
+                            self.org_scroll_top = 0
+                            self.search_query = ""
+                            self.search_mode = False
+                            # pre-select current org
+                            filtered = self._filtered_orgs()
+                            try:
+                                self.org_selected = filtered.index(self.org)
+                            except ValueError:
+                                self.org_selected = len(filtered)
+                            self.needs_redraw = True
+
+                        elif key == "m" or key == "q":
+                            if self.music_channel_search:
+                                self.music_channel_search = ""
+                                self.music_channel_search_mode = False
+                                self.music_channel_selected = 0
+                                self.music_channel_scroll_top = 0
+                                self.needs_redraw = True
+                            else:
+                                self.mode = "main"
+                                self.music_submode = "channels"
+                                self.needs_redraw = True
+                        elif key == "\x1b":
+                            if self.music_channel_search:
+                                self.music_channel_search = ""
+                                self.music_channel_search_mode = False
+                                self.music_channel_selected = 0
+                                self.music_channel_scroll_top = 0
+                                self.needs_redraw = True
+                            else:
+                                self.mode = "main"
+                                self.music_submode = "channels"
+                                self.needs_redraw = True
+                        elif key == "g":
+                            self.music_channel_selected = 0
+                            self.music_channel_scroll_top = 0
+                            self.needs_redraw = True
+                        elif key == "G":
+                            if filtered:
+                                self.music_channel_selected = len(filtered) - 1
+                                self.music_channel_scroll_top = max(0, len(filtered) - PAGE_SIZE)
+                                self.needs_redraw = True
+
+                    else:  # music_submode == "videos"
+                        total_items = len(self.music_videos)
+
+                        if key in ("\x1b[A", "k"):
+                            self.music_video_selected = max(0, self.music_video_selected - 1)
+                            if self.music_video_selected < self.music_video_scroll_top:
+                                self.music_video_scroll_top = self.music_video_selected
+                            self.needs_redraw = True
+                        elif key in ("\x1b[B", "j"):
+                            self.music_video_selected = min(total_items - 1, self.music_video_selected + 1)
+                            if self.music_video_selected >= self.music_video_scroll_top + PAGE_SIZE:
+                                self.music_video_scroll_top = self.music_video_selected - PAGE_SIZE + 1
+                            self.needs_redraw = True
+                        elif key in ("\r", "\n"):
+                            self._open_music_video()
+                        elif key == "1":
+                            self.fetch_music_videos(self.music_current_channel["id"], "all")
+                            self.needs_redraw = True
+                        elif key == "2":
+                            self.fetch_music_videos(self.music_current_channel["id"], "karaoke")
+                            self.needs_redraw = True
+                        elif key == "3":
+                            self.fetch_music_videos(self.music_current_channel["id"], "cover")
+                            self.needs_redraw = True
+                        elif key == "4":
+                            self.fetch_music_videos(self.music_current_channel["id"], "original")
+                            self.needs_redraw = True
+                        elif key == "r":
+                            self.fetch_music_videos(self.music_current_channel["id"], self.music_video_filter)
+                            self.needs_redraw = True
+                        elif key == "\x1b":
+                            self.music_submode = "channels"
+                            self.needs_redraw = True
+                        elif key == "m" or key == "q":
+                            self.mode = "main"
+                            self.music_submode = "channels"
+                            self.needs_redraw = True
+                        elif key == "g":
+                            self.music_video_selected = 0
+                            self.music_video_scroll_top = 0
+                            self.needs_redraw = True
+                        elif key == "G":
+                            self.music_video_selected = total_items - 1
+                            self.music_video_scroll_top = max(0, total_items - PAGE_SIZE)
+                            self.needs_redraw = True
+
+                    continue 
 
                 # ── Main Mode ──
                 if key in ("\x1b[A", "k"):
@@ -716,6 +1252,7 @@ class HolodexTUI:
                 elif key in ("\r", "\n"):
                     self._open()
                 elif key == "o":
+                    self.prev_mode = "main"
                     self.fetch_orgs()
                     self.mode = "org_picker"
                     self.org_scroll_top = 0
@@ -727,6 +1264,13 @@ class HolodexTUI:
                         self.org_selected = filtered.index(self.org)
                     except ValueError:
                         self.org_selected = len(filtered)
+                    self.needs_redraw = True
+                elif key == "m":
+                    self.fetch_music_channels()
+                    self.mode = "music"
+                    self.music_submode = "channels"
+                    self.music_channel_search = ""
+                    self.music_channel_search_mode = False
                     self.needs_redraw = True
                 elif key == "r":
                     self.fetch()
