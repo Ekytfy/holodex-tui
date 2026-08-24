@@ -53,6 +53,25 @@ FALLBACK_ORGS = [
     "Phase-Connect", "VShojo", "idol Corp", "PRISM Project", "Independent",
 ]
 
+def get_cache_dir():
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    cache_dir = base / "holodex-tui"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+def load_video_cache(channel_id):
+    path = get_cache_dir() / f"music_videos_{channel_id}.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+def save_video_cache(channel_id, data):
+    path = get_cache_dir() / f"music_videos_{channel_id}.json"
+    path.write_text(json.dumps({"data": data, "ts": time.time()}, indent=2))
 
 def get_config_path():
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -171,6 +190,7 @@ class HolodexTUI:
         self.music_video_selected = 0
         self.music_video_scroll_top = 0
         self.music_last_fetch = 0
+
 
         # Search state
         self.search_query = ""
@@ -356,7 +376,12 @@ class HolodexTUI:
             self.music_channels = []
 
     def fetch_music_videos(self, channel_id, filter_type="all"):
-        try:
+        now = time.time()
+        cached = load_video_cache(channel_id)
+        
+        if cached and now - cached["ts"] < 1800:  # 30 min TTL
+            all_vids = cached["data"]
+        else:
             all_vids = []
             seen = set()
 
@@ -391,37 +416,29 @@ class HolodexTUI:
                         break
                     offset += limit
 
-            # Only fetch by topic — no fallback broad search
-            if filter_type in ("all", "karaoke"):
-                fetch_topic("singing", "karaoke")
-            if filter_type in ("all", "cover"):
-                fetch_topic("Music_Cover", "cover")
-            if filter_type in ("all", "original"):
-                fetch_topic("Original_Song", "original")
+            fetch_topic("singing", "karaoke")
+            fetch_topic("Music_Cover", "cover")
+            fetch_topic("Original_Song", "original")
 
-            # Sort by date
-            all_vids.sort(
-                key=lambda v: v.get("available_at") or "",
-                reverse=True
-            )
+            all_vids.sort(key=lambda v: v.get("available_at") or "", reverse=True)
+            save_video_cache(channel_id, all_vids)
 
-            # Filter
-            if filter_type == "karaoke":
-                result = [v for v in all_vids if v["_category"] == "karaoke"]
-            elif filter_type == "cover":
-                result = [v for v in all_vids if v["_category"] == "cover"]
-            elif filter_type == "original":
-                result = [v for v in all_vids if v["_category"] == "original"]
-            else:  # all
-                result = [v for v in all_vids if v["_category"] in ("karaoke", "cover", "original")]
+        # Filter from cached data
+        if filter_type == "karaoke":
+            result = [v for v in all_vids if v["_category"] == "karaoke"]
+        elif filter_type == "cover":
+            result = [v for v in all_vids if v["_category"] == "cover"]
+        elif filter_type == "original":
+            result = [v for v in all_vids if v["_category"] == "original"]
+        else:  # all
+            result = [v for v in all_vids if v["_category"] in ("karaoke", "cover", "original")]
 
-            self.music_videos = result
-            self.music_video_selected = 0
-            self.music_video_scroll_top = 0
-            self.music_video_filter = filter_type
-            self.error_msg = None
-        except requests.RequestException as e:
-            self.error_msg = str(e)
+        self.music_videos = result
+        self.music_video_selected = 0
+        self.music_video_scroll_top = 0
+        self.music_video_filter = filter_type
+        self.music_last_fetch = now
+        self.error_msg = None
 
     def fetch(self):
         try:
