@@ -195,6 +195,8 @@ class HolodexTUI:
         # Search state
         self.search_query = ""
         self.search_mode = False
+        self.search_target = ""
+        self.music_videos_all = []  
 
         # Favorites
         config = load_config()
@@ -206,6 +208,23 @@ class HolodexTUI:
             "Accept": "application/json",
             "X-APIKEY": api_key,
         }
+    def _draw_search_bar(self, placeholder="Search..."):
+        """Draw a search bar at the top of the screen."""
+        if not self.search_mode:
+            return
+        
+        cursor = "█" if int(time.time() * 2) % 2 == 0 else " "
+        query_display = self.search_query or ""
+        
+        bar = Panel(
+            f"{query_display}{cursor} [dim](Esc clear, Enter confirm)[/dim]",
+            border_style="yellow",
+            title="[bold yellow]Search[/bold yellow]",
+            title_align="left",
+        )
+        console.print(bar)
+        console.print()
+
     def _handle_music_search_key(self, key):
         if key == "\x7f" or key == "\x08":
             self.music_channel_search = self.music_channel_search[:-1]
@@ -439,6 +458,7 @@ class HolodexTUI:
         self.music_video_filter = filter_type
         self.music_last_fetch = now
         self.error_msg = None
+        self.music_videos_all = all_vids
 
     def fetch(self):
         try:
@@ -551,20 +571,21 @@ class HolodexTUI:
             self._draw_music_videos()
 
     def _filtered_music_channels(self):
-        if not self.music_channel_search:
+        if not self.search_query:
             return self.music_channels
-        q = self.music_channel_search.lower()
+        q = self.search_query.lower()
         return [c for c in self.music_channels if q in c.get("name", "").lower()]
 
     def _draw_music_channels(self):
         console.clear()
+        self._draw_search_bar("Search organizations...")
         total = len(self.music_channels)
         search_info = f" | filter: '{self.music_channel_search}'" if self.music_channel_search else ""
         page_info = f" | {self.music_channel_selected + 1}/{max(1,total)}"
 
         header = (
-            f"[bold]Music - Pick a Streamer[/] | [cyan]{self.org}[/]{page_info}{search_info} | "
-            f"/ search | Enter pick | m back | q quit"
+        f"[bold]Music - Pick a Streamer[/] | [cyan]{self.org}[/]{page_info}{search_info} | "
+        f"/ search | Enter pick | g/G jump | Esc back | [magenta]m main | q quit"
         )
         console.print(Align.center(Panel(header, border_style="magenta")))
         console.print()
@@ -616,12 +637,10 @@ class HolodexTUI:
         if visible_end < total_items:
             console.print("[dim]  ▼ more below[/dim]")
 
-        if self.music_channel_search_mode:
-            cursor = "█" if int(time.time() * 2) % 2 == 0 else " "
-            console.print(f"\n[dim]Search: {self.music_channel_search}{cursor}[/dim]")
 
     def _draw_music_videos(self):
         console.clear()
+        self._draw_search_bar("Search videos...")
         total = len(self.music_videos)
         ch_name = self.music_current_channel.get("name", "?") if self.music_current_channel else "?"
 
@@ -633,8 +652,8 @@ class HolodexTUI:
         )
 
         header = (
-            f"[bold]Music - {ch_name}[/] | {tabs} | "
-            f"{total} videos | Enter play | Esc back | m main | q quit"
+            f"[bold]Music - {ch_name}[/] | {tabs} |"
+            f"{total} videos | Enter play | g/G jump | Esc back | [magenta] m main | q quit"
         )
         console.print(Align.center(Panel(header, border_style="magenta")))
         console.print()
@@ -645,7 +664,7 @@ class HolodexTUI:
 
         if not self.music_videos:
             console.print("[yellow]No videos found for this filter.[/yellow]")
-            console.print("[dim]Press 1/2/3 to change filter[/dim]")
+            console.print("[dim]Press 1/2/3/4 to change tab[/dim]")
             return
 
         visible_start = self.music_video_scroll_top
@@ -660,24 +679,35 @@ class HolodexTUI:
         )
         table.add_column("#", style="cyan", width=3, justify="right")
         table.add_column("Title", style="white", ratio=2, no_wrap=True)
-        table.add_column("Topic", style="yellow", width=12, no_wrap=True)
+        table.add_column("Duration", style="yellow", width=8, justify="right")
         table.add_column("Date", style="bright_cyan", width=12, justify="right")
 
         for i, s in enumerate(self.music_videos[visible_start:visible_end]):
             title = s.get("title", "Untitled")[:60]
-            topic = s.get("topic_id", "-")
+            duration = s.get("duration", 0)
             date = s.get("available_at", "?")[:10]
+
+            # Format duration as MM:SS or HH:MM:SS
+            if duration > 0:
+                mins, secs = divmod(int(duration), 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    dur_str = f"{hours}:{mins:02d}:{secs:02d}"
+                else:
+                    dur_str = f"{mins}:{secs:02d}"
+            else:
+                dur_str = "-"
 
             actual_index = visible_start + i
             if actual_index == self.music_video_selected:
                 table.add_row(
                     f"> {actual_index + 1}",
                     f"[bold reverse]{title}[/]",
-                    f"[bold reverse]{topic}[/]",
+                    f"[bold reverse]{dur_str}[/]",
                     f"[bold reverse]{date}[/]",
                 )
             else:
-                table.add_row(str(actual_index + 1), title, topic, date)
+                table.add_row(str(actual_index + 1), title, dur_str, date)
 
         console.print(table)
 
@@ -712,7 +742,7 @@ class HolodexTUI:
 
     def _draw_org_picker(self):
         console.clear()
-
+        self._draw_search_bar("Search organizations...")
         if self.fetching_orgs:
             console.print(Align.center(Panel(
                 "[bold yellow]Fetching organizations from Holodex...[/bold yellow]\n\n"
@@ -810,6 +840,7 @@ class HolodexTUI:
 
     def _draw_main(self):
         console.clear()
+        self._draw_search_bar("Search streams...")
         live = sum(1 for s in self.streams if s.get("status") == "live")
         total = len(self.streams)
         age = int(time.time() - self.last_fetch)
@@ -818,7 +849,7 @@ class HolodexTUI:
         header = (
             f"[bold]Holodex TUI[/] | [cyan]{self.org}[/] | "
             f"[green]{live} live[/] [dim]{total - live} up[/] | "
-            f"updated {age_str} | o org | [magenta]m music[/] | ? help | q quit"
+            f"updated {age_str} | o org | [magenta]m music[/] | g/G jump | ? help | q quit"
         )
         console.print(Align.center(Panel(header, border_style="blue")))
         console.print()
@@ -988,35 +1019,56 @@ class HolodexTUI:
         return False
 
     def _handle_search_key(self, key):
-        """Handle key input while in search mode."""
-        if key == "\x7f" or key == "\x08":
+        """Unified search handler for all modes."""
+        if key == "\x7f" or key == "\x08":  # Backspace
             self.search_query = self.search_query[:-1]
-            self.org_selected = 0
-            self.org_scroll_top = 0
+            self._apply_search_filter()
             self.needs_redraw = True
             return True
-        elif key in ("\r", "\n"):
+        elif key in ("\r", "\n"):  # Enter
             self.search_mode = False
             self.needs_redraw = True
             return True
-        elif key == "\x1b":
+        elif key == "\x1b":  # Esc
             self.search_query = ""
             self.search_mode = False
-            self.org_selected = 0
-            self.org_scroll_top = 0
+            self._apply_search_filter()
             self.needs_redraw = True
             return True
-        elif key in ("\x1b[A", "\x1b[B"):
-            # Arrow keys exit search mode and navigate
+        elif key in ("\x1b[A", "\x1b[B"):  # Arrow up/down
             self.search_mode = False
-            return False  # let normal handler process the arrow
-        elif len(key) == 1 and 32 <= ord(key) <= 126:
+            return False  # Let navigation handle it
+        elif len(key) == 1 and 32 <= ord(key) <= 126:  # Printable char
             self.search_query += key
-            self.org_selected = 0
-            self.org_scroll_top = 0
+            self._apply_search_filter()
             self.needs_redraw = True
             return True
         return False
+
+    def _apply_search_filter(self):
+        """Apply current search query to the active mode."""
+        q = self.search_query.lower()
+        
+        if self.mode == "org_picker":
+            self.org_selected = 0
+            self.org_scroll_top = 0
+            # Filtering happens in _filtered_orgs() which already checks self.search_query
+            
+        elif self.mode == "music" and self.music_submode == "channels":
+            self.music_channel_selected = 0
+            self.music_channel_scroll_top = 0
+            # Filtering happens in _filtered_music_channels()
+            
+        elif self.mode == "music" and self.music_submode == "videos":
+            if q:
+                self.music_videos = [
+                    v for v in self.music_videos_all
+                    if q in v.get("title", "").lower()
+                ]
+            else:
+                self.music_videos = self.music_videos_all  # Restore all
+            self.music_video_selected = 0
+            self.music_video_scroll_top = 0
 
     def _getch(self, timeout=None):
         fd = sys.stdin.fileno()
@@ -1132,8 +1184,8 @@ class HolodexTUI:
                 # ── Music Mode ──
                 if self.mode == "music":
                     if self.music_submode == "channels":
-                        if self.music_channel_search_mode:
-                            handled = self._handle_music_search_key(key)
+                        if self.search_mode:
+                            handled = self._handle_search_key(key)
                             if handled:
                                 continue
 
@@ -1153,7 +1205,7 @@ class HolodexTUI:
                                 self.music_submode = "videos"
                                 self.needs_redraw = True
                         elif key == "/":
-                            self.music_channel_search_mode = True
+                            self.search_mode = True
                             self.needs_redraw = True
                         elif key == "r":
                             self.fetch_music_channels()
@@ -1172,27 +1224,27 @@ class HolodexTUI:
                             except ValueError:
                                 self.org_selected = len(filtered)
                             self.needs_redraw = True
-
-                        elif key == "m" or key == "q":
-                            if self.music_channel_search:
-                                self.music_channel_search = ""
-                                self.music_channel_search_mode = False
-                                self.music_channel_selected = 0
-                                self.music_channel_scroll_top = 0
+                        elif key == "\x1b":  # Esc
+                            if self.search_query:
+                                self.search_query = ""
+                                self.search_mode = False
+                                self._apply_search_filter()
                                 self.needs_redraw = True
                             else:
                                 self.mode = "main"
                                 self.music_submode = "channels"
                                 self.needs_redraw = True
-                        elif key == "\x1b":
-                            if self.music_channel_search:
-                                self.music_channel_search = ""
-                                self.music_channel_search_mode = False
-                                self.music_channel_selected = 0
-                                self.music_channel_scroll_top = 0
-                                self.needs_redraw = True
-                            else:
-                                self.mode = "main"
+                        elif key == "m":
+                            self.search_query = ""
+                            self.search_mode = False
+                            self.mode = "main"
+                            self.music_submode = "channels"
+                            self.needs_redraw = True
+                        elif key == "q":
+                            if not self.search_query:
+                                self.search_query = ""
+                                self.search_mode = False
+                                self.mode = "main"  
                                 self.music_submode = "channels"
                                 self.needs_redraw = True
                         elif key == "g":
@@ -1206,6 +1258,11 @@ class HolodexTUI:
                                 self.needs_redraw = True
 
                     else:  # music_submode == "videos"
+                        if self.search_mode:
+                            handled = self._handle_search_key(key)
+                            if handled:
+                                continue
+
                         total_items = len(self.music_videos)
 
                         if key in ("\x1b[A", "k"):
@@ -1235,10 +1292,14 @@ class HolodexTUI:
                         elif key == "r":
                             self.fetch_music_videos(self.music_current_channel["id"], self.music_video_filter)
                             self.needs_redraw = True
-                        elif key == "\x1b":
+                        elif key == "\x1b":  # Esc
                             self.music_submode = "channels"
                             self.needs_redraw = True
-                        elif key == "m" or key == "q":
+                        elif key == "m":
+                            self.mode = "main"
+                            self.music_submode = "channels"
+                            self.needs_redraw = True
+                        elif key == "q":
                             self.mode = "main"
                             self.music_submode = "channels"
                             self.needs_redraw = True
